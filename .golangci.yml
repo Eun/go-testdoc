@@ -198,6 +198,8 @@ issues:
     - path: ./tests/
       linters:
         - deadcode
+        - stylecheck
+        - golint
     - path: _test\.go
       linters:
         - gocyclo

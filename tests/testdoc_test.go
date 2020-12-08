@@ -12,18 +12,6 @@ import (
 	"github.com/Eun/go-testdoc"
 )
 
-type fakeT struct {
-	fatalMsg string
-}
-
-func (t *fakeT) Fatal(a ...interface{}) {
-	t.fatalMsg = fmt.Sprint(a...)
-}
-
-func (t *fakeT) Fatalf(format string, a ...interface{}) {
-	t.fatalMsg = fmt.Sprintf(format, a...)
-}
-
 func test(dir string, includePrivate bool, expectedCalls []string) func(t *testing.T) {
 	return func(t *testing.T) {
 		var gotCalls []string

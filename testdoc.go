@@ -119,12 +119,12 @@ func TestCodeDocumentation(t interface {
 			})
 		}
 
-		ast.Inspect(f, astInspectorFunc(set, &docEntries, &errorSlice, &options))
+		ast.Inspect(f, astInspectorFunc(set, &docEntries, &errorSlice, options))
 
 		result = multierror.Append(result, errorSlice...)
 
 		for _, doc := range docEntries {
-			if err := testDocForFile(fileName, doc.lineno, doc.text, &options); err != nil {
+			if err := testDocForFile(fileName, doc.lineno, doc.text, options); err != nil {
 				result = multierror.Append(result, err)
 			}
 		}
@@ -150,7 +150,7 @@ type docEntry struct {
 	lineno int
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func astInspectorFunc(set *token.FileSet, docEntries *[]docEntry, errorSlice *[]error, options *Options) func(n ast.Node) bool {
 	return func(n ast.Node) bool {
 		var entries []docEntry
@@ -168,7 +168,7 @@ func astInspectorFunc(set *token.FileSet, docEntries *[]docEntry, errorSlice *[]
 	}
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectFuncDecl(set *token.FileSet, decl *ast.FuncDecl, options *Options) ([]docEntry, []error) {
 	if !options.IncludePrivate && !decl.Name.IsExported() {
 		return nil, nil
@@ -186,7 +186,7 @@ func inspectFuncDecl(set *token.FileSet, decl *ast.FuncDecl, options *Options) (
 		nil
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectGenDecl(set *token.FileSet, decl *ast.GenDecl, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -206,7 +206,7 @@ func inspectGenDecl(set *token.FileSet, decl *ast.GenDecl, options *Options) ([]
 	return entries, errs
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectTypeSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.TypeSpec, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -237,7 +237,7 @@ func inspectTypeSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.TypeSpec
 	return entries, errs
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectValueSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.ValueSpec, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -268,7 +268,7 @@ func inspectValueSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.ValueSp
 	return entries, errs
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectInterfaceType(set *token.FileSet, i *ast.InterfaceType, options *Options) ([]docEntry, []error) {
 	if i.Methods.List == nil {
 		return nil, nil
@@ -292,7 +292,7 @@ func inspectInterfaceType(set *token.FileSet, i *ast.InterfaceType, options *Opt
 	return entries, errs
 }
 
-//nolint:dupl
+//nolint:dupl,prealloc
 func inspectStructType(set *token.FileSet, s *ast.StructType, options *Options) ([]docEntry, []error) {
 	if s.Fields.List == nil {
 		return nil, nil
