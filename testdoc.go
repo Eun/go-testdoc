@@ -1,3 +1,4 @@
+// Package testdoc allows you to test your code your code documentation examples during normal test time.
 package testdoc
 
 import (
@@ -85,6 +86,7 @@ func TestCodeDocumentation(t interface {
 }, options *Options) {
 	if options == nil {
 		t.Fatalf("options cannot be nil")
+		return
 	}
 	if options.Symbols == nil {
 		options.Symbols = yaegi_template.DefaultSymbols()
@@ -168,7 +170,7 @@ func astInspectorFunc(set *token.FileSet, docEntries *[]docEntry, errorSlice *[]
 	}
 }
 
-//nolint:dupl,prealloc
+//nolint:dupl,prealloc,unparam
 func inspectFuncDecl(set *token.FileSet, decl *ast.FuncDecl, options *Options) ([]docEntry, []error) {
 	if !options.IncludePrivate && !decl.Name.IsExported() {
 		return nil, nil

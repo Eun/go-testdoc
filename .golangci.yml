@@ -1,6 +1,7 @@
 run:
   skip-dirs:
     - tests
+    - example
 linters-settings:
   depguard:
     list-type: blacklist
