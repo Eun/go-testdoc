@@ -82,7 +82,10 @@ type Options struct {
 func TestCodeDocumentation(t interface {
 	Fatalf(string, ...interface{})
 	Fatal(...interface{})
-}, options Options) {
+}, options *Options) {
+	if options == nil {
+		t.Fatalf("options cannot be nil")
+	}
 	if options.Symbols == nil {
 		options.Symbols = yaegi_template.DefaultSymbols()
 	}
@@ -147,6 +150,7 @@ type docEntry struct {
 	lineno int
 }
 
+//nolint:dupl
 func astInspectorFunc(set *token.FileSet, docEntries *[]docEntry, errorSlice *[]error, options *Options) func(n ast.Node) bool {
 	return func(n ast.Node) bool {
 		var entries []docEntry
@@ -164,6 +168,7 @@ func astInspectorFunc(set *token.FileSet, docEntries *[]docEntry, errorSlice *[]
 	}
 }
 
+//nolint:dupl
 func inspectFuncDecl(set *token.FileSet, decl *ast.FuncDecl, options *Options) ([]docEntry, []error) {
 	if !options.IncludePrivate && !decl.Name.IsExported() {
 		return nil, nil
@@ -181,6 +186,7 @@ func inspectFuncDecl(set *token.FileSet, decl *ast.FuncDecl, options *Options) (
 		nil
 }
 
+//nolint:dupl
 func inspectGenDecl(set *token.FileSet, decl *ast.GenDecl, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -200,6 +206,7 @@ func inspectGenDecl(set *token.FileSet, decl *ast.GenDecl, options *Options) ([]
 	return entries, errs
 }
 
+//nolint:dupl
 func inspectTypeSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.TypeSpec, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -230,6 +237,7 @@ func inspectTypeSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.TypeSpec
 	return entries, errs
 }
 
+//nolint:dupl
 func inspectValueSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.ValueSpec, options *Options) ([]docEntry, []error) {
 	var entries []docEntry
 	var errs []error
@@ -260,6 +268,7 @@ func inspectValueSpec(set *token.FileSet, parent *ast.GenDecl, spec *ast.ValueSp
 	return entries, errs
 }
 
+//nolint:dupl
 func inspectInterfaceType(set *token.FileSet, i *ast.InterfaceType, options *Options) ([]docEntry, []error) {
 	if i.Methods.List == nil {
 		return nil, nil
@@ -283,6 +292,7 @@ func inspectInterfaceType(set *token.FileSet, i *ast.InterfaceType, options *Opt
 	return entries, errs
 }
 
+//nolint:dupl
 func inspectStructType(set *token.FileSet, s *ast.StructType, options *Options) ([]docEntry, []error) {
 	if s.Fields.List == nil {
 		return nil, nil

@@ -27,7 +27,7 @@ func (t *fakeT) Fatalf(format string, a ...interface{}) {
 func test(dir string, includePrivate bool, expectedCalls []string) func(t *testing.T) {
 	return func(t *testing.T) {
 		var gotCalls []string
-		testdoc.TestCodeDocumentation(t, testdoc.Options{
+		testdoc.TestCodeDocumentation(t, &testdoc.Options{
 			Path:     dir,
 			PkgName:  "test",
 			Sections: []string{"Example"},

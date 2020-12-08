@@ -195,6 +195,9 @@ issues:
 
   exclude-rules:
     # Exclude some linters from running on tests files.
+    - path: ./tests/
+      linters:
+        - deadcode
     - path: _test\.go
       linters:
         - gocyclo

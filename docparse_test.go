@@ -3,6 +3,7 @@ package testdoc_test
 import (
 	"reflect"
 	"testing"
+
 	"github.com/Eun/go-testdoc"
 )
 

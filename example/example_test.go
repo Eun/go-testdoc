@@ -8,7 +8,7 @@ import (
 )
 
 func TestDocumentation(t *testing.T) {
-	testdoc.TestCodeDocumentation(t, testdoc.Options{
+	testdoc.TestCodeDocumentation(t, &testdoc.Options{
 		// Test for this folder
 		Path: ".",
 
