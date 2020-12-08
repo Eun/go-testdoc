@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 

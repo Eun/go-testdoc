@@ -1,3 +1,6 @@
+run:
+  skip-dirs:
+    - tests
 linters-settings:
   depguard:
     list-type: blacklist
@@ -195,11 +198,6 @@ issues:
 
   exclude-rules:
     # Exclude some linters from running on tests files.
-    - path: ./tests/
-      linters:
-        - deadcode
-        - stylecheck
-        - golint
     - path: _test\.go
       linters:
         - gocyclo
