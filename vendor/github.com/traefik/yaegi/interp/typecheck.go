@@ -37,7 +37,7 @@ func (check typecheck) assignment(n *node, typ *itype, context string) error {
 			if typ == nil && n.typ.cat == nilT {
 				return n.cfgErrorf("use of untyped nil in %s", context)
 			}
-			typ = n.typ.defaultType()
+			typ = n.typ.defaultType(n.rval)
 		}
 		if err := check.convertUntyped(n, typ); err != nil {
 			return err
@@ -45,6 +45,10 @@ func (check typecheck) assignment(n *node, typ *itype, context string) error {
 	}
 
 	if typ == nil {
+		return nil
+	}
+
+	if typ.isRecursive() || typ.val != nil && typ.val.isRecursive() {
 		return nil
 	}
 
@@ -65,7 +69,7 @@ func (check typecheck) assignExpr(n, dest, src *node) error {
 		isConst := n.anc.kind == constDecl
 		if !isConst {
 			// var operations must be typed
-			dest.typ = dest.typ.defaultType()
+			dest.typ = dest.typ.defaultType(src.rval)
 		}
 
 		return check.assignment(src, dest.typ, "assignment")
@@ -285,7 +289,10 @@ func (check typecheck) index(n *node, max int) error {
 }
 
 // arrayLitExpr type checks an array composite literal expression.
-func (check typecheck) arrayLitExpr(child []*node, typ *itype, length int) error {
+func (check typecheck) arrayLitExpr(child []*node, typ *itype) error {
+	cat := typ.cat
+	length := typ.length
+	typ = typ.val
 	visited := make(map[int]bool, len(child))
 	index := 0
 	for _, c := range child {
@@ -297,7 +304,7 @@ func (check typecheck) arrayLitExpr(child []*node, typ *itype, length int) error
 			}
 			n = c.child[1]
 			index = int(vInt(c.child[0].rval))
-		case length > 0 && index >= length:
+		case cat == arrayT && index >= length:
 			return c.cfgErrorf("index %d is out of bounds (>= %d)", index, length)
 		}
 
@@ -636,7 +643,7 @@ func (check typecheck) conversion(n *node, typ *itype) error {
 		return nil
 	}
 	if isInterface(typ) || !isConstType(typ) {
-		typ = n.typ.defaultType()
+		typ = n.typ.defaultType(n.rval)
 	}
 	return check.convertUntyped(n, typ)
 }
@@ -900,7 +907,7 @@ func arrayDeref(typ *itype) *itype {
 		return typ
 	}
 
-	if typ.cat == ptrT && typ.val.cat == arrayT && typ.val.sizedef {
+	if typ.cat == ptrT && typ.val.cat == arrayT {
 		return typ.val
 	}
 	return typ
@@ -956,7 +963,7 @@ func (check typecheck) argument(p param, ftyp *itype, i, l int, ellipsis bool) e
 		}
 		t := p.Type().TypeOf()
 		if t.Kind() != reflect.Slice || !(&itype{cat: valueT, rtype: t.Elem()}).assignableTo(atyp) {
-			return p.nod.cfgErrorf("cannot use %s as type %s", p.nod.typ.id(), (&itype{cat: arrayT, val: atyp}).id())
+			return p.nod.cfgErrorf("cannot use %s as type %s", p.nod.typ.id(), (&itype{cat: sliceT, val: atyp}).id())
 		}
 		return nil
 	}
@@ -1037,9 +1044,8 @@ func (check typecheck) convertUntyped(n *node, typ *itype) error {
 		if len(n.typ.methods()) > 0 { // untyped cannot be set to iface
 			return convErr
 		}
-		ityp = n.typ.defaultType()
+		ityp = n.typ.defaultType(n.rval)
 		rtyp = ntyp
-
 	case isArray(typ) || isMap(typ) || isChan(typ) || isFunc(typ) || isPtr(typ):
 		// TODO(nick): above we are acting on itype, but really it is an rtype check. This is not clear which type
 		// 		 	   plain we are in. Fix this later.
