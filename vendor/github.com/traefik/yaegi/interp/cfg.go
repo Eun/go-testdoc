@@ -7,7 +7,6 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"unicode"
 )
@@ -43,8 +42,6 @@ var constBltn = map[string]func(*node){
 	bltnImag:    imagConst,
 	bltnReal:    realConst,
 }
-
-var identifier = regexp.MustCompile(`([\pL_][\pL_\d]*)$`)
 
 const nilIdent = "nil"
 
@@ -82,7 +79,14 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					i--
 				}
 				dest := a.child[i]
-				if dest.typ != nil && !isInterface(dest.typ) {
+				if dest.typ == nil {
+					break
+				}
+				if dest.typ.incomplete {
+					err = n.cfgErrorf("invalid type declaration")
+					return false
+				}
+				if !isInterface(dest.typ) {
 					// Interface type are not propagated, and will be resolved at post-order.
 					n.typ = dest.typ
 				}
@@ -147,6 +151,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 							vtyp = &itype{cat: valueT, rtype: typ.Elem()}
 						case reflect.String:
 							sc.add(sc.getType("int")) // Add a dummy type to store array shallow copy for range
+							sc.add(sc.getType("int")) // Add a dummy type to store index for range
 							ktyp = sc.getType("int")
 							vtyp = sc.getType("rune")
 						case reflect.Array, reflect.Slice:
@@ -170,9 +175,10 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 						}
 					case stringT:
 						sc.add(sc.getType("int")) // Add a dummy type to store array shallow copy for range
+						sc.add(sc.getType("int")) // Add a dummy type to store index for range
 						ktyp = sc.getType("int")
 						vtyp = sc.getType("rune")
-					case arrayT, variadicT:
+					case arrayT, sliceT, variadicT:
 						sc.add(sc.getType("int")) // Add a dummy type to store array shallow copy for range
 						ktyp = sc.getType("int")
 						vtyp = o.typ.val
@@ -288,8 +294,12 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				// Get type from ancestor (implicit type)
 				if n.anc.kind == keyValueExpr && n == n.anc.child[0] {
 					n.typ = n.anc.typ.key
-				} else if n.anc.typ != nil {
-					n.typ = n.anc.typ.val
+				} else if atyp := n.anc.typ; atyp != nil {
+					if atyp.cat == valueT {
+						n.typ = &itype{cat: valueT, rtype: atyp.rtype.Elem()}
+					} else {
+						n.typ = atyp.val
+					}
 				}
 				if n.typ == nil {
 					err = n.cfgErrorf("undefined type")
@@ -514,10 +524,6 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					if dest.typ.incomplete {
 						return
 					}
-					if dest.typ.sizedef {
-						dest.typ.size = arrayTypeLen(src)
-						dest.typ.rtype = nil
-					}
 					if sc.global {
 						// Do not overload existing symbols (defined in GTA) in global scope
 						sym, _, _ = sc.lookup(dest.ident)
@@ -551,63 +557,74 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				n.findex = dest.findex
 				n.level = dest.level
 
-				// Propagate type
-				// TODO: Check that existing destination type matches source type
+				// In the following, we attempt to optimize by skipping the assign
+				// operation and setting the source location directly to the destination
+				// location in the frame.
+				//
 				switch {
-				case n.action == aAssign && isCall(src) && dest.typ.cat != interfaceT && !isMapEntry(dest) && !isRecursiveField(dest):
+				case n.action != aAssign:
+					// Do not skip assign operation if it is combined with another operator.
+				case src.rval.IsValid():
+					// Do not skip assign operation if setting from a constant value.
+				case isMapEntry(dest):
+					// Setting a map entry requires an additional step, do not optimize.
+					// As we only write, skip the default useless getIndexMap dest action.
+					dest.gen = nop
+				case isFuncField(dest):
+					// Setting a struct field of function type requires an extra step. Do not optimize.
+				case isCall(src) && !isInterfaceSrc(dest.typ) && !isRecursiveField(dest) && n.kind != defineStmt:
 					// Call action may perform the assignment directly.
+					if dest.typ.id() != src.typ.id() {
+						// Skip optimitization if returned type doesn't match assigned one.
+						break
+					}
 					n.gen = nop
 					src.level = level
 					src.findex = dest.findex
 					if src.typ.untyped && !dest.typ.untyped {
 						src.typ = dest.typ
 					}
-				case n.action == aAssign && src.action == aRecv:
+				case src.action == aRecv:
 					// Assign by reading from a receiving channel.
 					n.gen = nop
-					src.findex = dest.findex // Set recv address to LHS
+					src.findex = dest.findex // Set recv address to LHS.
 					dest.typ = src.typ
-				case n.action == aAssign && src.action == aCompositeLit && !isMapEntry(dest):
+				case src.action == aCompositeLit:
 					if dest.typ.cat == valueT && dest.typ.rtype.Kind() == reflect.Interface {
-						// Skip optimisation for assigned binary interface or map entry
-						// which require and additional operation to set the value
+						// Skip optimisation for assigned interface.
 						break
 					}
 					if dest.action == aGetIndex {
-						// optimization does not work when assigning to a struct field. Maybe we're not
-						// setting the right frame index or something, and we would end up not writing at
-						// the right place. So disabling it for now.
+						// Skip optimization, as it does not work when assigning to a struct field.
 						break
 					}
-					// Skip the assign operation entirely, the source frame index is set
-					// to destination index, avoiding extra memory alloc and duplication.
 					n.gen = nop
 					src.findex = dest.findex
 					src.level = level
-				case n.action == aAssign && len(n.child) < 4 && !src.rval.IsValid() && isArithmeticAction(src):
+				case len(n.child) < 4 && isArithmeticAction(src):
 					// Optimize single assignments from some arithmetic operations.
-					// Skip the assign operation entirely, the source frame index is set
-					// to destination index, avoiding extra memory alloc and duplication.
 					src.typ = dest.typ
 					src.findex = dest.findex
 					src.level = level
 					n.gen = nop
-				case src.kind == basicLit && !src.rval.IsValid():
+				case src.kind == basicLit:
 					// Assign to nil.
 					src.rval = reflect.New(dest.typ.TypeOf()).Elem()
+				case n.nright == 0:
+					n.gen = reset
 				}
+
 				n.typ = dest.typ
 				if sym != nil {
 					sym.typ = n.typ
 					sym.recv = src.recv
 				}
+
 				n.level = level
-				if isMapEntry(dest) {
-					dest.gen = nop // skip getIndexMap
-				}
+
 				if n.anc.kind == constDecl {
 					n.gen = nop
-					n.findex = -1
+					n.findex = notInFrame
 					if sym, _, ok := sc.lookup(dest.ident); ok {
 						sym.kind = constSym
 					}
@@ -648,7 +665,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				if n.child[0].ident == "_" {
 					lc.gen = typeAssertStatus
 				} else {
-					lc.gen = typeAssert2
+					lc.gen = typeAssertLong
 				}
 				n.gen = nop
 			case unaryExpr:
@@ -704,7 +721,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					break
 				}
 			}
-			if c0.rval.IsValid() && c1.rval.IsValid() && !isInterface(n.typ) && constOp[n.action] != nil {
+			if c0.rval.IsValid() && c1.rval.IsValid() && (!isInterface(n.typ)) && constOp[n.action] != nil {
 				n.typ.TypeOf()       // Force compute of reflection type.
 				constOp[n.action](n) // Compute a constant result now rather than during exec.
 			}
@@ -713,8 +730,8 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				// This operation involved constants, and the result is already computed
 				// by constOp and available in n.rval. Nothing else to do at execution.
 				n.gen = nop
-				n.findex = -1
-			case n.anc.kind == assignStmt && n.anc.action == aAssign:
+				n.findex = notInFrame
+			case n.anc.kind == assignStmt && n.anc.action == aAssign && n.anc.nleft == 1:
 				// To avoid a copy in frame, if the result is to be assigned, store it directly
 				// at the frame location of destination.
 				dest := n.anc.child[childPos(n)-n.anc.nright]
@@ -736,7 +753,13 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 			wireChild(n)
 			t := n.child[0].typ
 			switch t.cat {
-			case aliasT, ptrT:
+			case aliasT:
+				if isString(t.val.TypeOf()) {
+					n.typ = sc.getType("byte")
+					break
+				}
+				fallthrough
+			case ptrT:
 				n.typ = t.val
 				if t.val.cat == valueT {
 					n.typ = &itype{cat: valueT, rtype: t.val.rtype.Elem()}
@@ -842,27 +865,47 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 			wireChild(n)
 			switch {
 			case interp.isBuiltinCall(n):
-				err = check.builtin(n.child[0].ident, n, n.child[1:], n.action == aCallSlice)
+				c0 := n.child[0]
+				bname := c0.ident
+				err = check.builtin(bname, n, n.child[1:], n.action == aCallSlice)
 				if err != nil {
 					break
 				}
 
-				n.gen = n.child[0].sym.builtin
-				n.child[0].typ = &itype{cat: builtinT}
+				n.gen = c0.sym.builtin
+				c0.typ = &itype{cat: builtinT}
 				if n.typ, err = nodeType(interp, sc, n); err != nil {
 					return
 				}
 				switch {
 				case n.typ.cat == builtinT:
-					n.findex = -1
+					n.findex = notInFrame
 					n.val = nil
 				case n.anc.kind == returnStmt:
 					// Store result directly to frame output location, to avoid a frame copy.
 					n.findex = 0
+				case bname == "cap" && isInConstOrTypeDecl(n):
+					switch n.child[1].typ.TypeOf().Kind() {
+					case reflect.Array, reflect.Chan:
+						capConst(n)
+					default:
+						err = n.cfgErrorf("cap argument is not an array or channel")
+					}
+					n.findex = notInFrame
+					n.gen = nop
+				case bname == "len" && isInConstOrTypeDecl(n):
+					switch n.child[1].typ.TypeOf().Kind() {
+					case reflect.Array, reflect.Chan, reflect.String:
+						lenConst(n)
+					default:
+						err = n.cfgErrorf("len argument is not an array, channel or string")
+					}
+					n.findex = notInFrame
+					n.gen = nop
 				default:
 					n.findex = sc.add(n.typ)
 				}
-				if op, ok := constBltn[n.child[0].ident]; ok && n.anc.action != aAssign {
+				if op, ok := constBltn[bname]; ok && n.anc.action != aAssign {
 					op(n) // pre-compute non-assigned constant :
 				}
 			case n.child[0].isType(sc):
@@ -896,7 +939,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					n.rval = c1.rval
 				case c1.rval.IsValid() && isConstType(c0.typ):
 					n.gen = nop
-					n.findex = -1
+					n.findex = notInFrame
 					n.typ = c0.typ
 					if c, ok := c1.rval.Interface().(constant.Value); ok {
 						i, _ := constant.Int64Val(constant.ToInt(c))
@@ -938,6 +981,20 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 						}
 					}
 				}
+			case isOffsetof(n):
+				if len(n.child) != 2 || n.child[1].kind != selectorExpr || !isStruct(n.child[1].child[0].typ) {
+					err = n.cfgErrorf("Offsetof argument: invalid expression")
+					break
+				}
+				c1 := n.child[1]
+				field, ok := c1.child[0].typ.rtype.FieldByName(c1.child[1].ident)
+				if !ok {
+					err = n.cfgErrorf("struct does not contain field: %s", c1.child[1].ident)
+					break
+				}
+				n.typ = &itype{cat: valueT, rtype: reflect.TypeOf(field.Offset)}
+				n.rval = reflect.ValueOf(field.Offset)
+				n.gen = nop
 			default:
 				err = check.arguments(n, n.child[1:], n.child[0], n.action == aCallSlice)
 				if err != nil {
@@ -950,7 +1007,9 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				}
 				if typ := n.child[0].typ; len(typ.ret) > 0 {
 					n.typ = typ.ret[0]
-					if n.anc.kind == returnStmt {
+					if n.anc.kind == returnStmt && n.typ.id() == sc.def.typ.ret[0].id() {
+						// Store the result directly to the return value area of frame.
+						// It can be done only if no type conversion at return is involved.
 						n.findex = childPos(n)
 					} else {
 						n.findex = sc.add(n.typ)
@@ -959,7 +1018,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 						}
 					}
 				} else {
-					n.findex = -1
+					n.findex = notInFrame
 				}
 			}
 
@@ -1007,8 +1066,8 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 			}
 
 			switch n.typ.cat {
-			case arrayT:
-				err = check.arrayLitExpr(child, n.typ.val, n.typ.size)
+			case arrayT, sliceT:
+				err = check.arrayLitExpr(child, n.typ)
 			case mapT:
 				err = check.mapLitExpr(child, n.typ.key, n.typ.val)
 			case structT:
@@ -1040,7 +1099,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 		case fileStmt:
 			wireChild(n, varDecl)
 			sc = sc.pop()
-			n.findex = -1
+			n.findex = notInFrame
 
 		case forStmt0: // for {}
 			body := n.child[0]
@@ -1390,7 +1449,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				// TODO(mpl): move any of that code to typecheck?
 				c.typ.node = c
 				if !c.typ.assignableTo(typ) {
-					err = fmt.Errorf("cannot use %v (type %v) as type %v in return argument", c.ident, c.typ.cat, typ.cat)
+					err = c.cfgErrorf("cannot use %v (type %v) as type %v in return argument", c.ident, c.typ.cat, typ.cat)
 					return
 				}
 				if c.typ.cat == nilT {
@@ -1432,28 +1491,28 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 						n.typ = &itype{cat: valueT, rtype: field.Type}
 						n.val = field.Index
 						n.gen = getPtrIndexSeq
-					} else {
-						err = n.cfgErrorf("undefined field or method: %s", n.child[1].ident)
+						break
 					}
+					err = n.cfgErrorf("undefined field or method: %s", n.child[1].ident)
 				case n.typ.rtype.Kind() == reflect.Struct:
 					if field, ok := n.typ.rtype.FieldByName(n.child[1].ident); ok {
 						n.typ = &itype{cat: valueT, rtype: field.Type}
 						n.val = field.Index
 						n.gen = getIndexSeq
-					} else {
-						// method lookup failed on type, now lookup on pointer to type
-						pt := reflect.PtrTo(n.typ.rtype)
-						if m2, ok2 := pt.MethodByName(n.child[1].ident); ok2 {
-							n.val = m2.Index
-							n.gen = getIndexBinPtrMethod
-							n.typ = &itype{cat: valueT, rtype: m2.Type, recv: &itype{cat: valueT, rtype: pt}}
-							n.recv = &receiver{node: n.child[0]}
-							n.action = aGetMethod
-						} else {
-							err = n.cfgErrorf("undefined field or method: %s", n.child[1].ident)
-						}
+						break
 					}
+					fallthrough
 				default:
+					// method lookup failed on type, now lookup on pointer to type
+					pt := reflect.PtrTo(n.typ.rtype)
+					if m2, ok2 := pt.MethodByName(n.child[1].ident); ok2 {
+						n.val = m2.Index
+						n.gen = getIndexBinPtrMethod
+						n.typ = &itype{cat: valueT, rtype: m2.Type, recv: &itype{cat: valueT, rtype: pt}}
+						n.recv = &receiver{node: n.child[0]}
+						n.action = aGetMethod
+						break
+					}
 					err = n.cfgErrorf("undefined field or method: %s", n.child[1].ident)
 				}
 			} else if n.typ.cat == ptrT && (n.typ.val.cat == valueT || n.typ.val.cat == errorT) {
@@ -1485,7 +1544,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					if isBinType(s) {
 						n.typ = &itype{cat: valueT, rtype: s.Type().Elem()}
 					} else {
-						n.typ = &itype{cat: valueT, rtype: s.Type(), untyped: isValueUntyped(s)}
+						n.typ = &itype{cat: valueT, rtype: fixPossibleConstType(s.Type()), untyped: isValueUntyped(s)}
 						n.rval = s
 					}
 					n.action = aGetSym
@@ -1498,6 +1557,9 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				// Resolve source package symbol
 				if sym, ok := interp.srcPkg[pkg][name]; ok {
 					n.findex = sym.index
+					if sym.global {
+						n.level = globalFrame
+					}
 					n.val = sym.node
 					n.gen = nop
 					n.action = aGetSym
@@ -1512,7 +1574,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 				if n.child[0].isType(sc) {
 					// Handle method as a function with receiver in 1st argument
 					n.val = m
-					n.findex = -1
+					n.findex = notInFrame
 					n.gen = nop
 					n.typ = &itype{}
 					*n.typ = *m.typ
@@ -1825,7 +1887,7 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 			switch {
 			case n.rval.IsValid():
 				n.gen = nop
-				n.findex = -1
+				n.findex = notInFrame
 			case n.anc.kind == assignStmt && n.anc.action == aAssign:
 				dest := n.anc.child[childPos(n)-n.anc.nright]
 				n.typ = dest.typ
@@ -1847,11 +1909,13 @@ func (interp *Interpreter) cfg(root *node, importPath string) ([]*node, error) {
 					return
 				}
 			}
+
 			for _, c := range n.child[:l] {
 				var index int
 				if sc.global {
 					// Global object allocation is already performed in GTA.
 					index = sc.sym[c.ident].index
+					c.level = globalFrame
 				} else {
 					index = sc.add(n.typ)
 					sc.sym[c.ident] = &symbol{index: index, kind: varSym, typ: n.typ}
@@ -1878,8 +1942,15 @@ func compDefineX(sc *scope, n *node) error {
 		if err != nil {
 			return err
 		}
+		for funtype.cat == valueT && funtype.val != nil {
+			// Retrieve original interpreter type from a wrapped function.
+			// Struct fields of function types are always wrapped in valueT to ensure
+			// their possible use in runtime. In that case, the val field retains the
+			// original interpreter type, which is used now.
+			funtype = funtype.val
+		}
 		if funtype.cat == valueT {
-			// Handle functions imported from runtime
+			// Handle functions imported from runtime.
 			for i := 0; i < funtype.rtype.NumOut(); i++ {
 				types = append(types, &itype{cat: valueT, rtype: funtype.rtype.Out(i)})
 			}
@@ -1903,7 +1974,7 @@ func compDefineX(sc *scope, n *node) error {
 		if n.child[0].ident == "_" {
 			n.child[l].gen = typeAssertStatus
 		} else {
-			n.child[l].gen = typeAssert2
+			n.child[l].gen = typeAssertLong
 		}
 		types = append(types, n.child[l].child[1].typ, sc.getType("bool"))
 		n.gen = nop
@@ -2302,6 +2373,20 @@ func isRecursiveField(n *node) bool {
 	return false
 }
 
+func isInConstOrTypeDecl(n *node) bool {
+	anc := n.anc
+	for anc != nil {
+		switch anc.kind {
+		case constDecl, typeDecl:
+			return true
+		case varDecl, funcDecl:
+			return false
+		}
+		anc = anc.anc
+	}
+	return false
+}
+
 // isNewDefine returns true if node refers to a new definition.
 func isNewDefine(n *node, sc *scope) bool {
 	if n.ident == "_" {
@@ -2326,6 +2411,10 @@ func isMethod(n *node) bool {
 	return len(n.child[0].child) > 0 // receiver defined
 }
 
+func isFuncField(n *node) bool {
+	return isField(n) && isFunc(n.typ)
+}
+
 func isMapEntry(n *node) bool {
 	return n.action == aGetIndex && isMap(n.child[0].typ)
 }
@@ -2336,6 +2425,10 @@ func isCall(n *node) bool {
 
 func isBinCall(n *node) bool {
 	return isCall(n) && n.child[0].typ.cat == valueT && n.child[0].typ.rtype.Kind() == reflect.Func
+}
+
+func isOffsetof(n *node) bool {
+	return isCall(n) && n.child[0].typ.cat == valueT && n.child[0].rval.String() == "Offsetof"
 }
 
 func mustReturnValue(n *node) bool {
@@ -2428,7 +2521,9 @@ func gotoLabel(s *symbol) {
 		return
 	}
 	for _, c := range s.from {
-		c.tnext = s.node.start
+		if c.tnext == nil {
+			c.tnext = s.node.start
+		}
 	}
 }
 
@@ -2436,7 +2531,7 @@ func compositeGenerator(n *node, typ *itype, rtyp reflect.Type) (gen bltnGenerat
 	switch typ.cat {
 	case aliasT, ptrT:
 		gen = compositeGenerator(n, n.typ.val, rtyp)
-	case arrayT:
+	case arrayT, sliceT:
 		gen = arrayLit
 	case mapT:
 		gen = mapLit
@@ -2461,6 +2556,10 @@ func compositeGenerator(n *node, typ *itype, rtyp reflect.Type) (gen bltnGenerat
 		if rtyp == nil {
 			rtyp = n.typ.rtype
 		}
+		// TODO(mpl): I do not understand where this side-effect is coming from, and why it happens. quickfix for now.
+		if rtyp == nil {
+			rtyp = n.typ.val.rtype
+		}
 		switch k := rtyp.Kind(); k {
 		case reflect.Struct:
 			if n.nleft == 1 {
@@ -2473,6 +2572,8 @@ func compositeGenerator(n *node, typ *itype, rtyp reflect.Type) (gen bltnGenerat
 			gen = compositeBinMap
 		case reflect.Ptr:
 			gen = compositeGenerator(n, typ, n.typ.val.rtype)
+		case reflect.Slice:
+			gen = compositeBinSlice
 		default:
 			log.Panic(n.cfgErrorf("compositeGenerator not implemented for type kind: %s", k))
 		}
@@ -2484,8 +2585,8 @@ func compositeGenerator(n *node, typ *itype, rtyp reflect.Type) (gen bltnGenerat
 // array variable it is determined from the value's type, otherwise it is
 // computed from the source definition.
 func arrayTypeLen(n *node) int {
-	if n.typ != nil && n.typ.sizedef {
-		return n.typ.size
+	if n.typ != nil && n.typ.cat == arrayT {
+		return n.typ.length
 	}
 	max := -1
 	for i, c := range n.child[1:] {
@@ -2508,28 +2609,22 @@ func isValueUntyped(v reflect.Value) bool {
 	if v.CanSet() {
 		return false
 	}
-	t := v.Type()
-	if t.Implements(constVal) {
-		return true
-	}
-	return t.String() == t.Kind().String()
+	return v.Type().Implements(constVal)
 }
 
 // isArithmeticAction returns true if the node action is an arithmetic operator.
 func isArithmeticAction(n *node) bool {
 	switch n.action {
-	case aAdd, aAnd, aAndNot, aBitNot, aMul, aQuo, aRem, aShl, aShr, aSub, aXor:
+	case aAdd, aAnd, aAndNot, aBitNot, aMul, aNeg, aOr, aPos, aQuo, aRem, aShl, aShr, aSub, aXor:
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
 func isBoolAction(n *node) bool {
 	switch n.action {
 	case aEqual, aGreater, aGreaterEqual, aLand, aLor, aLower, aLowerEqual, aNot, aNotEqual:
 		return true
-	default:
-		return false
 	}
+	return false
 }
