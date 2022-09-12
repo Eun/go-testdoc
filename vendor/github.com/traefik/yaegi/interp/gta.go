@@ -27,6 +27,7 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 			// values which may be used in further declarations.
 			if _, err = interp.cfg(n, importPath); err != nil {
 				// No error processing here, to allow recovery in subtree nodes.
+				// TODO(marc): check for a non recoverable error and return it for better diagnostic.
 				err = nil
 			}
 
@@ -79,9 +80,7 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 				if typ.isBinMethod {
 					typ = &itype{cat: valueT, rtype: typ.methodCallType(), isBinMethod: true, scope: sc}
 				}
-				if sc.sym[dest.ident] == nil || sc.sym[dest.ident].typ.incomplete {
-					sc.sym[dest.ident] = &symbol{kind: varSym, global: true, index: sc.add(typ), typ: typ, rval: val, node: n}
-				}
+				sc.sym[dest.ident] = &symbol{kind: varSym, global: true, index: sc.add(typ), typ: typ, rval: val, node: n}
 				if n.anc.kind == constDecl {
 					sc.sym[dest.ident].kind = constSym
 					if childPos(n) == len(n.anc.child)-1 {
@@ -115,6 +114,7 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 					sc.sym[c.ident] = &symbol{index: sc.add(n.typ), kind: varSym, global: true, typ: n.typ, node: n}
 					continue
 				}
+				c.level = globalFrame
 
 				// redeclaration error
 				if sym.typ.node != nil && sym.typ.node.anc != nil {
@@ -187,11 +187,11 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 			}
 			// Try to import a binary package first, or a source package
 			var pkgName string
-			if interp.binPkg[ipath] != nil {
+			if pkg := interp.binPkg[ipath]; pkg != nil {
 				switch name {
 				case "_": // no import of symbols
 				case ".": // import symbols in current scope
-					for n, v := range interp.binPkg[ipath] {
+					for n, v := range pkg {
 						typ := v.Type()
 						if isBinType(v) {
 							typ = typ.Elem()
@@ -200,15 +200,18 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 					}
 				default: // import symbols in package namespace
 					if name == "" {
-						name = identifier.FindString(ipath)
+						name = interp.pkgNames[ipath]
 					}
-					// imports of a same package are all mapped in the same scope, so we cannot just
+					// Imports of a same package are all mapped in the same scope, so we cannot just
 					// map them by their names, otherwise we could have collisions from same-name
 					// imports in different source files of the same package. Therefore, we suffix
 					// the key with the basename of the source file.
 					name = filepath.Join(name, baseName)
-					if _, exists := sc.sym[name]; !exists {
+					if sym, exists := sc.sym[name]; !exists {
 						sc.sym[name] = &symbol{kind: pkgSym, typ: &itype{cat: binPkgT, path: ipath, scope: sc}}
+						break
+					} else if sym.kind == pkgSym && sym.typ.cat == srcPkgT && sym.typ.path == ipath {
+						// ignore re-import of identical package
 						break
 					}
 
@@ -231,8 +234,11 @@ func (interp *Interpreter) gta(root *node, rpath, importPath string) ([]*node, e
 						name = pkgName
 					}
 					name = filepath.Join(name, baseName)
-					if _, exists := sc.sym[name]; !exists {
+					if sym, exists := sc.sym[name]; !exists {
 						sc.sym[name] = &symbol{kind: pkgSym, typ: &itype{cat: srcPkgT, path: ipath, scope: sc}}
+						break
+					} else if sym.kind == pkgSym && sym.typ.cat == srcPkgT && sym.typ.path == ipath {
+						// ignore re-import of identical package
 						break
 					}
 
@@ -318,7 +324,50 @@ func (interp *Interpreter) gtaRetry(nodes []*node, importPath string) error {
 	}
 
 	if len(revisit) > 0 {
-		return revisit[0].cfgErrorf("constant definition loop")
+		n := revisit[0]
+		if n.kind == typeSpec {
+			if err := definedType(n.typ); err != nil {
+				return err
+			}
+		}
+		return n.cfgErrorf("constant definition loop")
+	}
+	return nil
+}
+
+func definedType(typ *itype) error {
+	if !typ.incomplete {
+		return nil
+	}
+	switch typ.cat {
+	case interfaceT, structT:
+		for _, f := range typ.field {
+			if err := definedType(f.typ); err != nil {
+				return err
+			}
+		}
+	case funcT:
+		for _, t := range typ.arg {
+			if err := definedType(t); err != nil {
+				return err
+			}
+		}
+		for _, t := range typ.ret {
+			if err := definedType(t); err != nil {
+				return err
+			}
+		}
+	case mapT:
+		if err := definedType(typ.key); err != nil {
+			return err
+		}
+		fallthrough
+	case aliasT, arrayT, chanT, chanSendT, chanRecvT, ptrT, variadicT:
+		if err := definedType(typ.val); err != nil {
+			return err
+		}
+	case nilT:
+		return typ.node.cfgErrorf("undefined: %s", typ.node.ident)
 	}
 	return nil
 }
