@@ -6,7 +6,7 @@ github.com/Eun/yaegi-template/codebuffer
 github.com/davecgh/go-spew/spew
 # github.com/hashicorp/errwrap v1.0.0
 github.com/hashicorp/errwrap
-# github.com/hashicorp/go-multierror v1.1.0
+# github.com/hashicorp/go-multierror v1.1.1
 ## explicit
 github.com/hashicorp/go-multierror
 # github.com/pkg/errors v0.9.1
