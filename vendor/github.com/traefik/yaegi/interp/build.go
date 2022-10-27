@@ -147,10 +147,22 @@ func skipFile(ctx *build.Context, p string, skipTest bool) bool {
 	}
 	a := strings.Split(p[i+1:], "_")
 	last := len(a) - 1
-	if last1 := last - 1; last1 >= 0 && a[last1] == ctx.GOOS && a[last] == ctx.GOARCH {
-		return false
+	if last-1 >= 0 {
+		switch x, y := a[last-1], a[last]; {
+		case x == ctx.GOOS:
+			if knownArch[y] {
+				return y != ctx.GOARCH
+			}
+			return false
+		case knownOs[x] && knownArch[y]:
+			return true
+		case knownArch[y] && y != ctx.GOARCH:
+			return true
+		default:
+			return false
+		}
 	}
-	if s := a[last]; s != ctx.GOOS && s != ctx.GOARCH && knownOs[s] || knownArch[s] {
+	if x := a[last]; knownOs[x] && x != ctx.GOOS || knownArch[x] && x != ctx.GOARCH {
 		return true
 	}
 	return false
@@ -163,9 +175,9 @@ var knownOs = map[string]bool{
 	"dragonfly": true,
 	"freebsd":   true,
 	"illumos":   true,
+	"ios":       true,
 	"js":        true,
 	"linux":     true,
-	"nacl":      true,
 	"netbsd":    true,
 	"openbsd":   true,
 	"plan9":     true,
@@ -176,9 +188,9 @@ var knownOs = map[string]bool{
 var knownArch = map[string]bool{
 	"386":      true,
 	"amd64":    true,
-	"amd64p32": true,
 	"arm":      true,
 	"arm64":    true,
+	"loong64":  true,
 	"mips":     true,
 	"mips64":   true,
 	"mips64le": true,
